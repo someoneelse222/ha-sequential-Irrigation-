@@ -155,7 +155,7 @@ class App:
             bl.append({"id": b["id"], "number": b["number"], "name": b.get("name", ""), "mainline": b["mainline"],
                        "entity": b.get("entity"), "default_min": b.get("default_min"), "enabled": b.get("enabled", True),
                        "valve": ev, "open_by": open_by.get(b["id"], [])})
-        return {"mainlines": mls, "blocks": bl, "events": list(reversed(eng.events[-40:])),
+        return {"mainlines": mls, "blocks": bl, "events": list(reversed(eng.events[-40:])), "activity": eng.activity(),
                 "ha_ok": eng.ha_ok, "now": eng.wall(), "error": self.last_tick_error}
 
     # ---------------------------------------------------------------- actions

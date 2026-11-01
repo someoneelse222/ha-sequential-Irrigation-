@@ -65,6 +65,7 @@ class Engine:
         self.cfg = model.empty_config()
         self.dirty = True
         self.wall = time.time   # replaceable in tests
+        self.recent: list[tuple[float, str]] = []   # recent switching, for the header line
 
     # ------------------------------------------------------------ persistence / log
     def save(self, force: bool = False) -> None:
@@ -283,6 +284,8 @@ class Engine:
             self.event(f"Could not switch {entity} {'on' if on else 'off'}: {err}", "error")
             return False
         self.commanded[entity] = {"on": on, "at": self.wall()}
+        self.recent.append((self.wall(), f"{'Opened' if on else 'Closed'} {self.label(entity)}"))
+        self.recent = self.recent[-10:]
         self.dirty = True
         if why:
             self.event(why)
@@ -456,6 +459,41 @@ class Engine:
                 self.overrides.pop(e, None)
             await self.send(e, on, f"Sent {'open' if on else 'close'} to {e}.")
         return True, f"Sent the {'open' if on else 'close'} signal to the pump."
+
+    def label(self, entity: str) -> str:
+        for b in self.cfg["blocks"]:
+            if b.get("entity") == entity:
+                return f"block {b['number']}"
+        for ml in self.cfg["mainlines"]:
+            if entity in ml.get("pump_entities", []):
+                return f"main on {ml['name']}"
+        return entity
+
+    def activity(self) -> list[str]:
+        """Short lines describing valve switching happening right now."""
+        now = self.wall()
+        out = []
+        for run in self.runs:
+            mlname = run["ml"].get("name", "")
+            ps = float(run["ml"].get("pump_start_s", 0) or 0)
+            pe = float(run["ml"].get("pump_stop_s", 0) or 0)
+            if run["state"] in ("pausing", "stopping") and run.get("phase_at"):
+                left = self.lead(run) - (now - run["phase_at"])
+                if left > 0:
+                    out.append(f"Waiting {math.ceil(left)} s to close blocks on {mlname}")
+            elif run["state"] == "running":
+                opened = run.get("opened_at")
+                if opened is not None and now - opened < ps:
+                    out.append(f"Waiting {math.ceil(ps - (now - opened))} s to open main on {mlname}")
+                to_end = self.end_e(run) - run["e"]
+                if to_end != math.inf:
+                    if pe < to_end <= pe + 10:
+                        out.append(f"Closing main on {mlname} in {math.ceil(to_end - pe)} s")
+                    elif 0 < to_end <= pe:
+                        out.append(f"Waiting {math.ceil(to_end)} s to close blocks on {mlname}")
+        out += [t for at, t in self.recent if now - at <= 4]
+        seen = set()
+        return [x for x in out if not (x in seen or seen.add(x))][:3]
 
     # ------------------------------------------------------------ live view data
     def run_view(self, run: dict) -> dict:

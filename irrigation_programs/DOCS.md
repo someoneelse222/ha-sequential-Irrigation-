@@ -15,7 +15,7 @@ Your valves and pump/main valve must exist in Home Assistant as `switch`, `valve
   program you see every step: done, running (with time left), next and later (with start times),
   plus when the program or loop ends. Skip step, Pause, Resume and Stop per program, per mainline
   or for everything. Several programs can run on the same mainline at once.
-- **Programs**: the step editor and run mode (once at set times, loop until a set time, loop
+- **Programs**: a list per mainline (tick to enable/disable, ✎ to edit) and the step editor with run mode (once at set times, loop until a set time, loop
   constantly), plus an optional season.
 - **Blocks**: live state of every valve, which program has it open and how long is left.
   **Open** and **Close** always send the signal, even if the valve already looks open or closed,

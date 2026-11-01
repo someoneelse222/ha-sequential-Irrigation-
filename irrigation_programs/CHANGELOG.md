@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+- Header line shows valve switching as it happens (e.g. "Opened block 3", "Waiting 5 s to close blocks on Mainline 1").
+- Live page: each mainline is its own clearly separated section with its controls next to the title.
+- Programs page is a list per mainline with enable tick, status and Edit; rows coloured running / paused / disabled.
+- Blocks page grouped by mainline, rows coloured when open or disabled.
+- A valve can only belong to one block (and not be a pump too).
+- Setup page removed. Better phone layout.
+
 ## 0.2.0
 - The add-on now switches valves and pumps itself (Irrigation Unlimited is no longer used).
 - Pump/main valve opens after the blocks and always closes first (finish, pause, stop).

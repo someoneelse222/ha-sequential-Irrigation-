@@ -17,7 +17,7 @@ const S = {
   entities: [],
   setup: null,
   live: null,
-  selProgram: null,
+  editing: null,       // program open in the editor
   issues: { errors: [], warnings: [] },
   issuesOpen: true,
   savedNotes: [],     // warnings shown after a save
@@ -144,23 +144,19 @@ async function loadData() {
   S.draft = clone(d.config);
   S.entities = d.entities;
   S.setup = d.setup;
-  if (!S.selProgram && S.draft.programs.length) S.selProgram = S.draft.programs[0].id;
-  setupDot();
-}
-function setupDot() {
-  $("#setup-dot").hidden = !(S.setup && (!S.setup.ha_ok || S.setup.iu_link));
 }
 
 function setTab(tab) {
   S.tab = tab;
+  if (tab !== "programs") S.editing = null;
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== "view-" + tab));
   render();
-  pollLive();
+  window.scrollTo(0, 0);
 }
 
 function render() {
-  ({ live: renderLive, programs: renderPrograms, blocks: renderBlocks, mainlines: renderMainlines, setup: renderSetup })[S.tab]();
+  ({ live: renderLive, programs: renderPrograms, blocks: renderBlocks, mainlines: renderMainlines })[S.tab]();
   renderSavebar();
   renderNotes();
 }
@@ -238,11 +234,21 @@ async function save() {
 let liveTimer = null;
 async function pollLive() {
   clearTimeout(liveTimer);
-  if (!["live", "blocks"].includes(S.tab)) return;
-  try { S.live = await api("GET", "api/live"); } catch (e) { S.live = { error: e.message, mainlines: [], blocks: [], events: [] }; }
+  try { S.live = await api("GET", "api/live"); } catch (e) { S.live = { error: e.message, ha_ok: false, mainlines: [], blocks: [], events: [], activity: [] }; }
+  renderActivity();
   if (S.tab === "live") renderLive();
   if (S.tab === "blocks") drawBlockTable();
+  if (S.tab === "programs" && !S.editing) drawProgramTable();
   liveTimer = setTimeout(pollLive, 2000);
+}
+
+function renderActivity() {
+  const el = $("#activity");
+  const a = S.live?.activity || [];
+  if (S.live && S.live.ha_ok === false) { el.textContent = "No contact with Home Assistant"; el.className = "activity err"; return; }
+  el.textContent = a.length ? a[0] : "";
+  el.title = a.join("\n");
+  el.className = "activity" + (a.length ? " busy" : "");
 }
 
 async function act(body, label, confirm) {
@@ -255,6 +261,8 @@ async function act(body, label, confirm) {
   } catch (e) { toast(e.message, 6000); }
 }
 
+const runningIds = () => new Map((S.live?.mainlines || []).flatMap((m) => m.runs.map((r) => [r.program_id, r.state])));
+
 /* ------------------------------------------------------------ live view */
 function renderLive() {
   const v = $("#view-live");
@@ -262,7 +270,6 @@ function renderLive() {
   const cfg = S.saved;
   const L = S.live;
   if (L && L.ha_ok === false) v.append(h("div", { class: "notice err" }, "No contact with Home Assistant right now. Running programs are held where they are and carry on when it's back."));
-  if (L?.error && L.ha_ok !== false) v.append(h("div", { class: "notice err" }, "Error: " + L.error));
   if (!cfg.mainlines.length) {
     v.append(h("div", { class: "card empty" },
       h("h2", {}, "Nothing set up yet"),
@@ -270,62 +277,66 @@ function renderLive() {
       h("button", { class: "btn primary", onclick: () => setTab("mainlines") }, "Add a mainline")));
     return;
   }
-  const mls = L?.mainlines || [];
-  const grid = h("div", { class: "live-grid" });
-  for (const ml of cfg.mainlines) grid.append(mainlineCard(ml, mls.find((x) => x.id === ml.id)));
-  v.append(grid);
+  for (const ml of cfg.mainlines) v.append(mainlineSection(ml, (L?.mainlines || []).find((x) => x.id === ml.id)));
   if (L?.events?.length) {
     v.append(h("div", { class: "card", style: "margin-top:16px" },
       h("h3", {}, "Recent activity"),
       h("ul", { class: "events" }, L.events.slice(0, 15).map((e) =>
-        h("li", { class: e.kind }, h("span", { class: "t" }, clock(e.at)), e.text)))));
+        h("li", { class: e.kind }, h("span", { class: "t" }, clock(e.at)), h("span", {}, e.text))))));
   }
 }
 
-function pumpRow(ml, c) {
-  if (!c?.pumps?.length) return h("div", { class: "pump-row muted" }, "No pump / main valve set");
-  const on = c.pumps.some((p) => p.actual);
-  const bad = c.pumps.some((p) => p.out_of_sync);
-  return h("div", { class: "pump-row" },
-    h("span", { class: "pump " + (on ? "on" : "") }, on ? "● Pump / main open" : "○ Pump / main closed"),
-    bad ? h("span", { class: "tag warn" }, "out of sync") : null,
-    c.pumps.some((p) => p.held_closed) ? h("span", { class: "tag warn" }, "held closed") : null,
-    h("span", { class: "grow" }),
-    h("button", { class: "btn small", onclick: () => act({ action: "pump_open", mainline: ml.id }, "Sent open") }, "Open"),
-    h("button", { class: "btn small", onclick: () => act({ action: "pump_close", mainline: ml.id }, "Sent close") }, "Close"));
-}
-
-function mainlineCard(ml, c) {
+function mainlineSection(ml, c) {
   const runs = c?.runs || [];
-  const card = h("div", { class: "card ml-card" });
-  const anyRun = runs.some((r) => r.state === "running");
-  const anyPaused = runs.some((r) => r.state === "paused" || r.state === "pausing");
-  card.append(h("div", { class: "ml-head" },
-    h("h3", {}, ml.name),
-    h("span", { class: "pill " + (anyRun ? "running" : anyPaused ? "paused" : "") }, anyRun ? `${runs.length} running` : anyPaused ? "Paused" : "Idle")));
-  card.append(pumpRow(ml, c));
-  for (const r of runs) card.append(runPanel(r));
+  const running = runs.filter((r) => r.state === "running").length;
+  const paused = runs.filter((r) => r.state === "paused" || r.state === "pausing").length;
+  const pumps = c?.pumps || [];
+  const pumpOn = pumps.some((p) => p.actual);
+  const sec = h("section", { class: "mlsec" + (running ? " active" : paused ? " paused" : "") });
 
-  // start another program
+  // header: title, state, mainline controls
+  const status = running ? `${running} running` + (paused ? `, ${paused} paused` : "") : paused ? `${paused} paused` : "Idle";
+  sec.append(h("header", { class: "mlsec-head" },
+    h("div", { class: "mlsec-title" },
+      h("h2", {}, ml.name),
+      h("span", { class: "pill " + (running ? "running" : paused ? "paused" : "") }, status)),
+    runs.length ? h("div", { class: "mlsec-ctrl" },
+      h("button", { class: "btn small", onclick: () => act({ action: "pause_all", mainline: ml.id }, "Mainline paused") }, "Pause all"),
+      h("button", { class: "btn small", onclick: () => act({ action: "resume_all", mainline: ml.id }, "Mainline resumed") }, "Resume all"),
+      h("button", { class: "btn small danger", onclick: () => act({ action: "stop_all", mainline: ml.id }, "Stopping",
+        ["Stop everything?", `Stop all programs on ${ml.name}?`, "Stop all", true]) }, "Stop all")) : null));
+
+  // pump strip
+  sec.append(pumps.length
+    ? h("div", { class: "pump-row" },
+      h("span", { class: "pump " + (pumpOn ? "on" : "") }, pumpOn ? "● Main open" : "○ Main closed"),
+      h("span", { class: "muted small" }, pumps.map((p) => p.id).join(", ")),
+      pumps.some((p) => p.out_of_sync) ? h("span", { class: "tag warn" }, "out of sync") : null,
+      pumps.some((p) => p.held_closed) ? h("span", { class: "tag warn" }, "held closed") : null,
+      h("span", { class: "grow" }),
+      h("button", { class: "btn small", onclick: () => act({ action: "pump_open", mainline: ml.id }, "Sent open") }, "Open"),
+      h("button", { class: "btn small", onclick: () => act({ action: "pump_close", mainline: ml.id }, "Sent close") }, "Close"))
+    : h("div", { class: "pump-row muted" }, "No pump / main valve set"));
+
+  const body = h("div", { class: "mlsec-body" });
+  const runsCol = h("div", { class: "runs" });
+  if (runs.length) runs.forEach((r) => runsCol.append(runPanel(r)));
+  else runsCol.append(h("div", { class: "muted idle-note" }, "Nothing running on this mainline."));
+  const side = h("aside", { class: "mlsec-side" });
   const progs = S.saved.programs.filter((x) => x.mainline === ml.id && x.enabled !== false);
   const idle = progs.filter((p) => !runs.some((r) => r.program_id === p.id));
+  side.append(h("div", { class: "label" }, "Start a program"));
   if (idle.length) {
     const sel = h("select", {}, idle.map((x) => h("option", { value: x.id }, x.name)));
-    card.append(h("div", { class: "idle-start" }, sel,
-      h("button", { class: "btn primary", onclick: () => act({ action: "start", program: sel.value }, "Started") }, runs.length ? "Start as well" : "Start")));
-  } else if (!progs.length) card.append(h("p", { class: "muted" }, "No programs on this mainline yet."));
-
-  if (c?.upcoming?.length) {
-    card.append(h("div", { class: "upcoming" }, h("div", { class: "label" }, "Coming up"),
-      c.upcoming.map((u) => h("div", { class: "up-row" }, h("span", {}, u.program), h("span", { class: "muted" }, fmtWhen(u.at))))));
-  }
-  if (runs.length > 1 || (runs.length && anyPaused)) {
-    card.append(h("div", { class: "ml-actions" },
-      h("button", { class: "btn small", onclick: () => act({ action: "pause_all", mainline: ml.id }, "Paused (pump closes first)") }, "Pause mainline"),
-      h("button", { class: "btn small", onclick: () => act({ action: "resume_all", mainline: ml.id }, "Resumed") }, "Resume mainline"),
-      h("button", { class: "btn small danger", onclick: () => act({ action: "stop_all", mainline: ml.id }, "Stopping (pump closes first)", ["Stop everything?", `Stop all programs on ${ml.name}? The pump closes first, then the blocks.`, "Stop all", true]) }, "Stop mainline")));
-  }
-  return card;
+    side.append(h("div", { class: "idle-start" }, sel,
+      h("button", { class: "btn primary", onclick: () => act({ action: "start", program: sel.value }, "Started") }, "Start")));
+  } else side.append(h("div", { class: "muted small" }, progs.length ? "All programs on this mainline are running." : "No enabled programs on this mainline."));
+  side.append(h("div", { class: "label", style: "margin-top:14px" }, "Coming up"));
+  if (c?.upcoming?.length) c.upcoming.forEach((u) => side.append(h("div", { class: "up-row" }, h("span", {}, u.program), h("span", { class: "muted" }, fmtWhen(u.at)))));
+  else side.append(h("div", { class: "muted small" }, "Nothing scheduled."));
+  body.append(runsCol, side);
+  sec.append(body);
+  return sec;
 }
 
 function runPanel(r) {
@@ -346,14 +357,13 @@ function runPanel(r) {
   if (r.next_loop_at && !r.finishing) facts.push(`next loop ${clock(r.next_loop_at)}`);
   if (paused) facts.push("timer stopped while paused");
   box.append(h("div", { class: "muted facts" }, facts.join(" · ")));
-
   const list = h("ol", { class: "steplist" });
   for (const s of r.steps) {
     const right = s.status === "running"
       ? h("div", { class: "st-right" }, h("b", {}, (paused ? "⏸ " : "") + fmtDur(s.left_s) + " left"), h("div", { class: "bar" }, h("i", { style: `width:${100 * (1 - s.left_s / s.duration_s)}%` })))
       : s.status === "done" ? h("div", { class: "st-right muted" }, "✓ done")
         : s.status === "skipped" ? h("div", { class: "st-right muted" }, "won't run")
-          : h("div", { class: "st-right muted" }, s.starts_at ? `${s.status === "next" ? "next · " : ""}starts ${clock(s.starts_at)}` : (s.status === "next" ? "next" : ""));
+          : h("div", { class: "st-right muted" }, s.starts_at ? `${s.status === "next" ? "next · " : ""}${clock(s.starts_at)}` : (s.status === "next" ? "next" : ""));
     list.append(h("li", { class: "st " + s.status },
       h("span", { class: "st-n" }, s.n),
       h("div", { class: "st-main" },
@@ -361,11 +371,10 @@ function runPanel(r) {
         h("div", { class: "muted st-dur" }, fmtDur(s.duration_s) + (s.overlap_s ? ` · ${s.overlap_s}s overlap` : ""))),
       right));
   }
-  box.append(list);
-  box.append(h("div", { class: "ml-actions" },
+  box.append(list, h("div", { class: "ml-actions" },
     h("button", { class: "btn small", disabled: paused || stopping, onclick: () => act({ action: "skip", run: r.id }, "Skipped to the next step") }, "Skip step"),
-    h("button", { class: "btn small", disabled: stopping, onclick: () => act({ action: paused ? "resume" : "pause", run: r.id }, paused ? "Resumed" : "Paused: pump closes first") }, paused ? "Resume" : "Pause"),
-    h("button", { class: "btn small danger", disabled: stopping, onclick: () => act({ action: "stop", run: r.id }, "Stopping: pump closes first", ["Stop this program?", `Stop ${r.name}? The pump closes first, then the blocks.`, "Stop", true]) }, "Stop")));
+    h("button", { class: "btn small", disabled: stopping, onclick: () => act({ action: paused ? "resume" : "pause", run: r.id }, paused ? "Resumed" : "Paused") }, paused ? "Resume" : "Pause"),
+    h("button", { class: "btn small danger", disabled: stopping, onclick: () => act({ action: "stop", run: r.id }, "Stopping", ["Stop this program?", `Stop ${r.name}?`, "Stop", true]) }, "Stop")));
   return box;
 }
 
@@ -381,35 +390,66 @@ function newProgram() {
     steps: [{ blocks: [], duration_min: 60, overlap_s: null }],
   };
   S.draft.programs.push(p);
-  S.selProgram = p.id;
+  S.editing = p.id;
   changed();
+}
+
+function progTotal(p) {
+  if (!p.steps.length) return "–";
+  return p.mode === "once" ? fmtDur(runLength(p)) : `${fmtDur(loopPeriod(p))} / loop`;
 }
 
 function renderPrograms() {
   const v = $("#view-programs");
   v.innerHTML = "";
-  const d = S.draft;
-  const list = h("div", { class: "card plist" });
-  for (const ml of d.mainlines) {
-    const ps = d.programs.filter((p) => p.mainline === ml.id);
-    list.append(h("div", { class: "group" }, ml.name));
-    if (!ps.length) list.append(h("div", { class: "muted", style: "padding:4px 8px 8px;font-size:13px" }, "No programs"));
-    for (const p of ps) {
-      list.append(h("button", {
-        class: "pitem" + (p.id === S.selProgram ? " on" : "") + (p.enabled === false ? " off" : ""),
-        onclick: () => { S.selProgram = p.id; render(); },
-      }, h("span", { class: "n" }, p.name), h("span", { class: "m" }, modeLabel(p))));
-    }
+  const p = S.editing && S.draft.programs.find((x) => x.id === S.editing);
+  if (p) {
+    const ed = h("div", { class: "card editor" });
+    v.append(h("div", { class: "row", style: "margin-bottom:12px" },
+      h("button", { class: "btn", onclick: () => { S.editing = null; render(); } }, "← All programs")), ed);
+    programEditor(ed, p);
+    return;
   }
-  list.append(h("div", { style: "padding:8px" }, h("button", { class: "btn primary", style: "width:100%", onclick: newProgram }, "+ New program")));
-  const p = d.programs.find((x) => x.id === S.selProgram);
-  const ed = h("div", { class: "card editor" });
-  if (!p) {
-    ed.append(h("div", { class: "empty" }, h("h2", {}, "No program selected"),
+  S.editing = null;
+  v.append(h("div", { class: "page-head" },
+    h("div", {}, h("h2", {}, "Programs"), h("p", { class: "sub" }, "Tick to enable or disable a program. ✎ edits it.")),
+    h("button", { class: "btn primary", onclick: newProgram }, "+ New program")),
+  h("div", { id: "prog-table" }));
+  drawProgramTable();
+}
+
+function drawProgramTable() {
+  const box = $("#prog-table");
+  if (!box) return;
+  box.innerHTML = "";
+  const d = S.draft;
+  const running = runningIds();
+  if (!d.programs.length) {
+    box.append(h("div", { class: "card empty" }, h("h2", {}, "No programs yet"),
       h("p", {}, "A program runs your blocks in steps: each step opens one or more blocks for a set time, then the next step starts."),
       h("button", { class: "btn primary", onclick: newProgram }, "Create a program")));
-  } else programEditor(ed, p);
-  v.append(h("div", { class: "split" }, list, ed));
+    return;
+  }
+  for (const ml of d.mainlines) {
+    const ps = d.programs.filter((p) => p.mainline === ml.id);
+    if (!ps.length) continue;
+    const tb = h("tbody");
+    for (const p of ps) {
+      const on = p.enabled !== false;
+      const run = running.has(p.id);
+      const blocksUsed = new Set(p.steps.flatMap((s) => s.blocks)).size;
+      tb.append(h("tr", { class: run ? (["paused", "pausing"].includes(running.get(p.id)) ? "row-paused" : "row-run") : on ? "" : "row-off" },
+        h("td", { class: "cb", "data-label": "On" }, h("input", { type: "checkbox", checked: on, title: on ? "Enabled" : "Disabled", onchange: (e) => { p.enabled = e.target.checked; changed(); } })),
+        h("td", { "data-label": "Program" }, h("div", { class: "strong" }, p.name),
+          h("div", { class: "muted small" }, `${p.steps.length} step${p.steps.length === 1 ? "" : "s"} · ${blocksUsed} block${blocksUsed === 1 ? "" : "s"}`)),
+        h("td", { "data-label": "When" }, h("div", {}, MODES.find((m) => m[0] === p.mode)?.[1] || p.mode), h("div", { class: "muted small" }, modeLabel(p))),
+        h("td", { class: "lbl", "data-label": "Time" }, progTotal(p)),
+        h("td", { "data-label": "Status" }, run ? (["paused", "pausing"].includes(running.get(p.id)) ? h("span", { class: "state paused" }, "⏸ Paused") : h("span", { class: "state open" }, "● Running")) : on ? h("span", { class: "state" }, "Enabled") : h("span", { class: "state off" }, "Disabled")),
+        h("td", { class: "acts" }, h("button", { class: "btn small", onclick: () => { S.editing = p.id; render(); window.scrollTo(0, 0); } }, "✎ Edit"))));
+    }
+    box.append(h("div", { class: "card group-card" }, h("div", { class: "group-title" }, ml.name),
+      h("table", { class: "tbl stack" }, h("thead", {}, h("tr", {}, h("th", {}, "On"), h("th", {}, "Program"), h("th", {}, "When"), h("th", {}, "Time"), h("th", {}, "Status"), h("th", {}))), tb)));
+  }
 }
 
 function daysPicker(days, onChange) {
@@ -494,12 +534,12 @@ function programEditor(ed, p) {
   ed.append(h("div", { class: "row", style: "justify-content:space-between;margin-top:6px" },
     h("button", { class: "btn", onclick: () => {
       const c = clone(p); c.id = rid("p"); c.name = p.name + " (copy)";
-      d.programs.splice(d.programs.indexOf(p) + 1, 0, c); S.selProgram = c.id; changed();
+      d.programs.splice(d.programs.indexOf(p) + 1, 0, c); S.editing = c.id; changed();
     } }, "Duplicate"),
     h("button", { class: "btn danger", onclick: async () => {
       if (!(await confirmBox("Delete program?", `Delete “${p.name}”? This takes effect when you save.`, "Delete", true))) return;
       d.programs.splice(d.programs.indexOf(p), 1);
-      S.selProgram = d.programs[0]?.id || null; changed();
+      S.editing = null; changed();
     } }, "Delete program")));
 }
 
@@ -540,7 +580,7 @@ function stepsSection(p) {
         h("button", { class: "icon-btn", title: "Duplicate step", onclick: () => { p.steps.splice(i + 1, 0, clone(st)); changed(); } }, "⧉"),
         h("button", { class: "icon-btn del", title: "Delete step", onclick: () => { p.steps.splice(i, 1); changed(); } }, "✕"))));
   });
-  sec.append(h("div", { class: "table-wrap" }, h("table", { class: "steps" },
+  sec.append(h("div", { class: "table-wrap" }, h("table", { class: "steps stack" },
     h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Blocks open together"), h("th", {}, "Duration"), h("th", {}, "Overlap with next"), h("th", {}))), tb)),
   h("div", { style: "margin-top:8px" }, h("button", { class: "btn small", onclick: () => {
     p.steps.push({ blocks: [], duration_min: 60, overlap_s: null, fresh: true }); changed();
@@ -551,7 +591,7 @@ function stepsSection(p) {
 }
 
 function renderSummary() {
-  const p = S.draft.programs.find((x) => x.id === S.selProgram);
+  const p = S.draft.programs.find((x) => x.id === S.editing);
   const el = $("#summary");
   if (!p || !el) return;
   el.innerHTML = "";
@@ -615,60 +655,66 @@ function renderBlocks() {
   const v = $("#view-blocks");
   v.innerHTML = "";
   const d = S.draft;
-  v.append(h("div", { class: "row", style: "justify-content:space-between;align-items:flex-end;margin-bottom:12px" },
-    h("div", {}, h("h2", {}, "Blocks"), h("p", { class: "sub", style: "margin:0" }, "Live state of every valve. Open and Close always send the signal, even if the valve already looks open or closed.")),
+  v.append(h("div", { class: "page-head" },
+    h("div", {}, h("h2", {}, "Blocks"), h("p", { class: "sub" }, "Open and Close always send the signal, even if the valve already looks open or closed.")),
     h("div", { class: "row" },
       h("input", { type: "text", placeholder: "Filter blocks", value: S.blockFilter, oninput: (e) => { S.blockFilter = e.target.value.toLowerCase(); drawBlockTable(); } }),
-      h("button", { class: "btn", onclick: addBlocksDialog }, "+ Add blocks"))));
+      h("button", { class: "btn primary", onclick: addBlocksDialog }, "+ Add blocks"))));
   if (!d.mainlines.length) {
     v.append(h("div", { class: "card empty" }, h("p", {}, "Add a mainline first, then put blocks on it."),
       h("button", { class: "btn primary", onclick: () => setTab("mainlines") }, "Go to Mainlines")));
     return;
   }
-  v.append(h("div", { class: "card table-wrap", id: "block-table" }), entDatalist());
+  v.append(h("div", { id: "block-table" }), entDatalist());
   drawBlockTable();
 }
 
 function drawBlockTable() {
-  const card = $("#block-table");
-  if (!card) return;
-  card.innerHTML = "";
+  const box = $("#block-table");
+  if (!box) return;
+  box.innerHTML = "";
   const d = S.draft;
-  const mls = byId(d.mainlines);
   const live = byId(S.live?.blocks || []);
   const savedIds = new Set(S.saved.blocks.map((b) => b.id));
-  const list = [...d.blocks].sort((a, b) => a.number - b.number)
-    .filter((b) => !S.blockFilter || `${b.number} ${b.name} ${b.entity}`.toLowerCase().includes(S.blockFilter));
-  if (!d.blocks.length) { card.append(h("div", { class: "empty" }, "No blocks yet. Use “Add blocks”.")); return; }
-  const tb = h("tbody");
-  for (const b of list) {
-    const lv = live[b.id];
-    const valve = lv?.valve;
-    let status;
-    if (!b.entity) status = h("span", { class: "muted" }, "no valve set");
-    else if (!savedIds.has(b.id)) status = h("span", { class: "muted" }, "save first");
-    else if (!valve || valve.actual === null) status = h("span", { class: "tag warn" }, valve?.raw ? `“${valve.raw}”` : "unknown");
-    else status = h("span", { class: "state " + (valve.actual ? "open" : "") }, valve.actual ? "● Open" : "○ Closed");
-    const by = (lv?.open_by || []).map((o) => o.manual ? `manual · ${fmtDur(o.left_s)} left` : `${o.run} · step ${o.step} · ${fmtDur(o.left_s)} left`);
-    const notes = [];
-    if (valve?.out_of_sync) notes.push(h("span", { class: "tag warn" }, `out of sync: should be ${valve.commanded ? "open" : "closed"}`));
-    if (valve?.held_closed) notes.push(h("span", { class: "tag warn" }, "held closed by you"));
-    if (valve?.actual && !valve.wanted && !valve.out_of_sync) notes.push(h("span", { class: "tag warn" }, "open, but no program needs it"));
-    if (b.enabled === false) notes.push(h("span", { class: "tag" }, "disabled"));
-    const canAct = b.entity && savedIds.has(b.id);
-    tb.append(h("tr", { class: valve?.actual ? "row-open" : "" },
-      h("td", { class: "mono", style: "font-weight:650" }, b.number),
-      h("td", {}, h("div", {}, b.name || h("span", { class: "muted" }, "—")), h("div", { class: "muted small" }, b.entity || "")),
-      h("td", {}, mls[b.mainline]?.name || h("span", { class: "tag warn" }, "none")),
-      h("td", {}, fmtDur((+b.default_min || 0) * 60)),
-      h("td", {}, h("div", { class: "row", style: "gap:6px;align-items:center" }, status, ...notes), by.length ? h("div", { class: "muted small" }, by.join(" | ")) : null),
-      h("td", { class: "acts" },
-        h("button", { class: "btn small", disabled: !canAct, title: `Open (runs ${fmtDur((+b.default_min || 0) * 60)} if nothing else has it open)`, onclick: () => act({ action: "block_open", block: b.id }, "Sent open") }, "Open"),
-        h("button", { class: "btn small", disabled: !canAct, onclick: () => act({ action: "block_close", block: b.id }, "Sent close") }, "Close"),
-        h("button", { class: "icon-btn", title: "Edit block", onclick: () => editBlock(b) }, "✎"))));
+  if (!d.blocks.length) { box.append(h("div", { class: "card empty" }, "No blocks yet. Use “Add blocks”.")); return; }
+  const groups = [...d.mainlines.map((m) => [m.id, m.name]), ["", "No mainline"]];
+  for (const [mlid, mlname] of groups) {
+    const list = d.blocks.filter((b) => (mlid ? b.mainline === mlid : !d.mainlines.some((m) => m.id === b.mainline)))
+      .sort((a, b) => a.number - b.number)
+      .filter((b) => !S.blockFilter || `${b.number} ${b.name} ${b.entity}`.toLowerCase().includes(S.blockFilter));
+    if (!list.length) continue;
+    const nOpen = list.filter((b) => live[b.id]?.valve?.actual).length;
+    const tb = h("tbody");
+    for (const b of list) {
+      const lv = live[b.id];
+      const valve = lv?.valve;
+      let status;
+      if (!b.entity) status = h("span", { class: "muted" }, "no valve set");
+      else if (!savedIds.has(b.id)) status = h("span", { class: "muted" }, "save first");
+      else if (!valve || valve.actual === null) status = h("span", { class: "tag warn" }, valve?.raw ? `“${valve.raw}”` : "unknown");
+      else status = h("span", { class: "state " + (valve.actual ? "open" : "") }, valve.actual ? "● Open" : "○ Closed");
+      const by = (lv?.open_by || []).map((o) => o.manual ? `manual · ${fmtDur(o.left_s)} left` : `${o.run} · step ${o.step} · ${fmtDur(o.left_s)} left`);
+      const notes = [];
+      if (valve?.out_of_sync) notes.push(h("span", { class: "tag warn" }, `out of sync: should be ${valve.commanded ? "open" : "closed"}`));
+      if (valve?.held_closed) notes.push(h("span", { class: "tag warn" }, "held closed by you"));
+      if (valve?.actual && !valve.wanted && !valve.out_of_sync) notes.push(h("span", { class: "tag warn" }, "open, but no program needs it"));
+      if (b.enabled === false) notes.push(h("span", { class: "tag" }, "disabled"));
+      const canAct = b.entity && savedIds.has(b.id);
+      const rowCls = valve?.actual ? "row-run" : b.enabled === false ? "row-off" : "";
+      tb.append(h("tr", { class: rowCls },
+        h("td", { class: "mono num-cell", "data-label": "No." }, b.number),
+        h("td", { "data-label": "Block" }, h("div", { class: "strong" }, b.name || "—"), h("div", { class: "muted small" }, b.entity || "")),
+        h("td", { class: "lbl", "data-label": "Default runtime" }, fmtDur((+b.default_min || 0) * 60)),
+        h("td", { "data-label": "Now" }, h("div", { class: "row", style: "gap:6px;align-items:center" }, status, ...notes), by.length ? h("div", { class: "muted small" }, by.join(" | ")) : null),
+        h("td", { class: "acts" },
+          h("button", { class: "btn small", disabled: !canAct, title: `Open (runs ${fmtDur((+b.default_min || 0) * 60)} if nothing else has it open)`, onclick: () => act({ action: "block_open", block: b.id }, "Sent open") }, "Open"),
+          h("button", { class: "btn small", disabled: !canAct, onclick: () => act({ action: "block_close", block: b.id }, "Sent close") }, "Close"),
+          h("button", { class: "btn small", title: "Edit block", onclick: () => editBlock(b) }, "✎"))));
+    }
+    box.append(h("div", { class: "card group-card" },
+      h("div", { class: "group-title" }, mlname, h("span", { class: "muted small" }, ` · ${list.length} block${list.length === 1 ? "" : "s"}${nOpen ? ` · ${nOpen} open` : ""}`)),
+      h("table", { class: "tbl stack" }, h("thead", {}, h("tr", {}, h("th", {}, "No."), h("th", {}, "Block / valve"), h("th", {}, "Default runtime"), h("th", {}, "Now"), h("th", {}))), tb)));
   }
-  card.append(h("table", { class: "tbl" },
-    h("thead", {}, h("tr", {}, h("th", {}, "No."), h("th", {}, "Name / valve"), h("th", {}, "Mainline"), h("th", {}, "Default runtime"), h("th", {}, "Now"), h("th", {}))), tb));
 }
 
 function blockForm(b) {
@@ -787,8 +833,8 @@ function renderMainlines() {
         } }, "Delete")),
       h("div", { class: "row", style: "align-items:flex-start;gap:28px" },
         h("div", { class: "field" }, h("span", { style: "font-size:13px;color:var(--ink-2);font-weight:550" }, "Pump / main valve switches"), pumpList),
-        num("pump_start_s", "Pump opens after blocks", "Blocks open first; the pump follows this long after."),
-        num("pump_stop_s", "Pump closes before blocks", "On finish, pause and stop the pump closes first, the blocks this long after."),
+        num("pump_start_s", "Pump opens after blocks", "Time between the blocks opening and the main opening."),
+        num("pump_stop_s", "Pump closes before blocks", "Time between the main closing and the blocks closing."),
         num("overlap_s", "Default step overlap", "The next step opens this long before the current one closes."))));
   });
   wrap.append(entDatalist());
@@ -798,30 +844,6 @@ function renderMainlines() {
   } }, "+ Add mainline")));
 }
 
-/* ------------------------------------------------------------ setup */
-function renderSetup() {
-  const v = $("#view-setup");
-  v.innerHTML = "";
-  const s = S.setup || {};
-  v.append(h("h2", {}, "Setup"), h("p", { class: "sub" }, "The add-on switches your valves and pumps itself, straight through Home Assistant."));
-  const step = (ok, title, text, btn) => h("div", { class: "card setup-step" },
-    h("div", { class: "tick " + (ok ? "ok" : "bad") }, ok ? "✓" : "!"),
-    h("div", {}, h("h3", {}, title), h("div", { class: "muted" }, text)), btn || h("span"));
-  const items = [step(s.ha_ok, "Connected to Home Assistant", s.ha_ok ? "Valves and pumps are switched through Home Assistant." : "Can't reach Home Assistant: " + (s.error || ""))];
-  if (s.iu_link) {
-    items.push(step(false, "Old link to Irrigation Unlimited",
-      "An earlier version handed programs to Irrigation Unlimited. That's no longer used (it has been switched off). Remove the line from configuration.yaml to tidy up.",
-      h("button", { class: "btn primary", onclick: async () => {
-        await api("POST", "api/setup/remove_iu");
-        toast("Removed. Irrigation Unlimited can now be uninstalled from HACS.");
-        const d = await api("GET", "api/data"); S.setup = d.setup; setupDot(); render();
-      } }, "Remove link")));
-  } else if (s.iu_installed) {
-    items.push(step(true, "Irrigation Unlimited not needed", "It's still installed in HACS but nothing uses it. You can uninstall it from HACS."));
-  }
-  v.append(h("div", { class: "steps-list" }, items));
-}
-
 /* ------------------------------------------------------------ boot */
 document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
 $("#save").addEventListener("click", save);
@@ -829,11 +851,11 @@ $("#discard").addEventListener("click", async () => {
   if (!(await confirmBox("Discard changes?", "Throw away everything you changed since the last save?", "Discard", true))) return;
   S.draft = clone(S.saved);
   S.issues = { errors: [], warnings: [] };
-  if (!S.draft.programs.some((p) => p.id === S.selProgram)) S.selProgram = S.draft.programs[0]?.id || null;
+  if (!S.draft.programs.some((p) => p.id === S.editing)) S.editing = null;
   render();
 });
 $("#issues-toggle").addEventListener("click", () => { S.issuesOpen = !S.issuesOpen; renderSavebar(); });
-$("#pause-all").addEventListener("click", () => act({ action: "pause_all" }, "Everything paused: pumps closed first"));
+$("#pause-all").addEventListener("click", () => act({ action: "pause_all" }, "Everything paused"));
 $("#resume-all").addEventListener("click", () => act({ action: "resume_all" }, "Everything resumed"));
 window.addEventListener("beforeunload", (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ""; } });
 
@@ -841,6 +863,7 @@ window.addEventListener("beforeunload", (e) => { if (dirty()) { e.preventDefault
   try {
     await loadData();
     setTab(S.saved.mainlines.length ? "live" : "mainlines");
+    pollLive();
   } catch (e) {
     $("#view-live").append(h("div", { class: "notice err" }, "Could not load: " + e.message));
   }

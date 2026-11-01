@@ -158,7 +158,17 @@ def validate(cfg: dict) -> tuple[list[str], list[str]]:
             warnings.append(f"Mainline '{name}' has no pump or main valve set.")
 
     numbers: dict[int, str] = {}
+    valves: dict[str, int] = {}
     for b in cfg.get("blocks", []):
+        ent = (b.get("entity") or "").strip()
+        if ent:
+            if ent in valves:
+                errors.append(f"Blocks {valves[ent]} and {b.get('number')} both use the valve {ent}. Each valve can only belong to one block.")
+            else:
+                valves[ent] = b.get("number")
+            pumps = {e for m in cfg.get("mainlines", []) for e in m.get("pump_entities", []) if e}
+            if ent in pumps:
+                errors.append(f"Block {b.get('number')} uses {ent}, which is also a pump / main valve.")
         label = f"Block {b.get('number')}"
         try:
             n = int(b.get("number"))
