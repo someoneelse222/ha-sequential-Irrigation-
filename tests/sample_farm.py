@@ -5,7 +5,7 @@ def farm(entities=False):
     blocks = []
     for n in range(1, 6):
         b = {"id": f"b_{n}", "number": n, "name": f"Field {n}", "mainline": "ml_a",
-             "max_min": 300, "enabled": True, "entity": f"switch.valve_{n}" if entities else ""}
+             "default_min": 60, "enabled": True, "entity": f"switch.valve_{n}" if entities else ""}
         blocks.append(b)
     return {
         "version": 1,

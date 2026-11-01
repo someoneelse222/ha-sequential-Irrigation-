@@ -1,7 +1,7 @@
 name: Irrigation Programs
-version: "0.1.0"
+version: "0.2.0"
 slug: irrigation_programs
-description: Step-based irrigation programs for farms, run by Irrigation Unlimited
+description: Step-based irrigation programs for farms
 arch:
   - aarch64
   - amd64
