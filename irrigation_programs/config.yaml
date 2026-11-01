@@ -1,5 +1,5 @@
 name: Irrigation Programs
-version: "0.3.0"
+version: "0.4.0"
 slug: irrigation_programs
 description: Step-based irrigation programs for farms
 arch:

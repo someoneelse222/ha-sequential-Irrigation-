@@ -261,7 +261,7 @@ async function act(body, label, confirm) {
   } catch (e) { toast(e.message, 6000); }
 }
 
-const runningIds = () => new Map((S.live?.mainlines || []).flatMap((m) => m.runs.map((r) => [r.program_id, r.state])));
+const runningIds = () => new Map((S.live?.mainlines || []).flatMap((m) => m.runs.map((r) => [r.program_id, r.closing && r.state === "running" ? "closing" : r.state])));
 
 /* ------------------------------------------------------------ live view */
 function renderLive() {
@@ -318,6 +318,11 @@ function mainlineSection(ml, c) {
       h("button", { class: "btn small", onclick: () => act({ action: "pump_close", mainline: ml.id }, "Sent close") }, "Close"))
     : h("div", { class: "pump-row muted" }, "No pump / main valve set"));
 
+  const held = [];
+  for (const r of runs) for (const st of r.steps) if (["running", "closing"].includes(st.status)) for (const b of st.blocks) if (b.held) held.push(`block ${b.number} (${r.name}, step ${st.n})`);
+  if (held.length) sec.append(h("div", { class: "held-note" },
+    h("b", {}, "Held closed by you: "), held.join(", "),
+    ". The rest of the step keeps running. It opens again at the next step that needs it, or press Open on the Blocks page."));
   const body = h("div", { class: "mlsec-body" });
   const runsCol = h("div", { class: "runs" });
   if (runs.length) runs.forEach((r) => runsCol.append(runPanel(r)));
@@ -342,15 +347,16 @@ function mainlineSection(ml, c) {
 function runPanel(r) {
   const paused = r.state === "paused" || r.state === "pausing";
   const stopping = r.state === "stopping";
-  const box = h("div", { class: "run " + r.state });
+  const box = h("div", { class: "run " + r.state + (r.closing && r.state === "running" ? " closing" : "") });
   const modeTxt = r.source === "block" ? "Manual block run"
     : r.mode === "loop" ? `Loops nonstop${r.loop ? ` · loop ${r.loop}` : ""}`
       : r.mode === "until" ? `Loops until ${clock(r.stop_at)}${r.loop ? ` · loop ${r.loop}` : ""}`
         : "Runs once";
-  const stateTxt = { running: r.finishing ? "Finishing step" : "Running", pausing: "Pausing…", paused: "Paused", stopping: "Stopping…" }[r.state];
+  const closingNow = r.state === "running" && r.closing;
+  const stateTxt = { running: closingNow ? (r.steps.some((s) => s.status === "running") ? "Changing step" : "Closing") : r.finishing ? "Finishing step" : "Running", pausing: "Pausing…", paused: "Paused", stopping: "Stopping…" }[r.state];
   box.append(h("div", { class: "run-head" },
     h("div", {}, h("div", { class: "prog-name" }, r.name), h("div", { class: "mode-tag" }, modeTxt)),
-    h("span", { class: "pill " + (paused ? "paused" : stopping ? "" : "running") }, stateTxt)));
+    h("span", { class: "pill " + (r.state === "pausing" || stopping || closingNow ? "closing" : paused ? "paused" : "running") }, stateTxt)));
   const facts = [`Started ${clock(r.started_at)}`];
   if (r.ends_at) facts.push(`ends ${fmtWhen(r.ends_at)}`);
   else if (r.mode === "loop") facts.push("runs until you stop it");
@@ -359,7 +365,9 @@ function runPanel(r) {
   box.append(h("div", { class: "muted facts" }, facts.join(" · ")));
   const list = h("ol", { class: "steplist" });
   for (const s of r.steps) {
-    const right = s.status === "running"
+    const right = s.status === "closing"
+      ? h("div", { class: "st-right closing-txt" }, h("b", {}, `closing · ${fmtDur(s.left_s)}`))
+      : s.status === "running"
       ? h("div", { class: "st-right" }, h("b", {}, (paused ? "⏸ " : "") + fmtDur(s.left_s) + " left"), h("div", { class: "bar" }, h("i", { style: `width:${100 * (1 - s.left_s / s.duration_s)}%` })))
       : s.status === "done" ? h("div", { class: "st-right muted" }, "✓ done")
         : s.status === "skipped" ? h("div", { class: "st-right muted" }, "won't run")
@@ -367,7 +375,9 @@ function runPanel(r) {
     list.append(h("li", { class: "st " + s.status },
       h("span", { class: "st-n" }, s.n),
       h("div", { class: "st-main" },
-        h("div", { class: "chips" }, s.blocks.map((b) => h("span", { class: "chip" + (s.status === "running" ? " open" : "") }, h("b", {}, b.number), b.name ? " " + b.name : ""))),
+        h("div", { class: "chips" }, s.blocks.map((b) => h("span", {
+          class: "chip" + (b.held && ["running", "closing"].includes(s.status) ? " held" : s.status === "closing" ? " closing" : s.status === "running" ? " open" : ""),
+          title: b.held ? "Held closed by you" : "" }, h("b", {}, b.number), b.name ? " " + b.name : "", b.held && ["running", "closing"].includes(s.status) ? " · held closed" : ""))),
         h("div", { class: "muted st-dur" }, fmtDur(s.duration_s) + (s.overlap_s ? ` · ${s.overlap_s}s overlap` : ""))),
       right));
   }
@@ -438,13 +448,16 @@ function drawProgramTable() {
       const on = p.enabled !== false;
       const run = running.has(p.id);
       const blocksUsed = new Set(p.steps.flatMap((s) => s.blocks)).size;
-      tb.append(h("tr", { class: run ? (["paused", "pausing"].includes(running.get(p.id)) ? "row-paused" : "row-run") : on ? "" : "row-off" },
+      const rs = running.get(p.id);
+      tb.append(h("tr", { class: run ? (rs === "paused" ? "row-paused" : ["pausing", "stopping", "closing"].includes(rs) ? "row-closing" : "row-run") : on ? "" : "row-off" },
         h("td", { class: "cb", "data-label": "On" }, h("input", { type: "checkbox", checked: on, title: on ? "Enabled" : "Disabled", onchange: (e) => { p.enabled = e.target.checked; changed(); } })),
         h("td", { "data-label": "Program" }, h("div", { class: "strong" }, p.name),
           h("div", { class: "muted small" }, `${p.steps.length} step${p.steps.length === 1 ? "" : "s"} · ${blocksUsed} block${blocksUsed === 1 ? "" : "s"}`)),
         h("td", { "data-label": "When" }, h("div", {}, MODES.find((m) => m[0] === p.mode)?.[1] || p.mode), h("div", { class: "muted small" }, modeLabel(p))),
         h("td", { class: "lbl", "data-label": "Time" }, progTotal(p)),
-        h("td", { "data-label": "Status" }, run ? (["paused", "pausing"].includes(running.get(p.id)) ? h("span", { class: "state paused" }, "⏸ Paused") : h("span", { class: "state open" }, "● Running")) : on ? h("span", { class: "state" }, "Enabled") : h("span", { class: "state off" }, "Disabled")),
+        h("td", { "data-label": "Status" }, run ? ({ paused: h("span", { class: "state paused" }, "⏸ Paused"), pausing: h("span", { class: "state closing" }, "● Pausing"),
+          stopping: h("span", { class: "state closing" }, "● Stopping"), closing: h("span", { class: "state closing" }, "● Changing step / closing") }[running.get(p.id)]
+          || h("span", { class: "state open" }, "● Running")) : on ? h("span", { class: "state" }, "Enabled") : h("span", { class: "state off" }, "Disabled")),
         h("td", { class: "acts" }, h("button", { class: "btn small", onclick: () => { S.editing = p.id; render(); window.scrollTo(0, 0); } }, "✎ Edit"))));
     }
     box.append(h("div", { class: "card group-card" }, h("div", { class: "group-title" }, ml.name),
@@ -659,7 +672,7 @@ function renderBlocks() {
     h("div", {}, h("h2", {}, "Blocks"), h("p", { class: "sub" }, "Open and Close always send the signal, even if the valve already looks open or closed.")),
     h("div", { class: "row" },
       h("input", { type: "text", placeholder: "Filter blocks", value: S.blockFilter, oninput: (e) => { S.blockFilter = e.target.value.toLowerCase(); drawBlockTable(); } }),
-      h("button", { class: "btn primary", onclick: addBlocksDialog }, "+ Add blocks"))));
+      h("button", { class: "btn primary", onclick: addBlocksDialog }, "+ Add block"))));
   if (!d.mainlines.length) {
     v.append(h("div", { class: "card empty" }, h("p", {}, "Add a mainline first, then put blocks on it."),
       h("button", { class: "btn primary", onclick: () => setTab("mainlines") }, "Go to Mainlines")));
@@ -676,7 +689,7 @@ function drawBlockTable() {
   const d = S.draft;
   const live = byId(S.live?.blocks || []);
   const savedIds = new Set(S.saved.blocks.map((b) => b.id));
-  if (!d.blocks.length) { box.append(h("div", { class: "card empty" }, "No blocks yet. Use “Add blocks”.")); return; }
+  if (!d.blocks.length) { box.append(h("div", { class: "card empty" }, "No blocks yet. Use “Add block”.")); return; }
   const groups = [...d.mainlines.map((m) => [m.id, m.name]), ["", "No mainline"]];
   for (const [mlid, mlname] of groups) {
     const list = d.blocks.filter((b) => (mlid ? b.mainline === mlid : !d.mainlines.some((m) => m.id === b.mainline)))
@@ -693,14 +706,16 @@ function drawBlockTable() {
       else if (!savedIds.has(b.id)) status = h("span", { class: "muted" }, "save first");
       else if (!valve || valve.actual === null) status = h("span", { class: "tag warn" }, valve?.raw ? `“${valve.raw}”` : "unknown");
       else status = h("span", { class: "state " + (valve.actual ? "open" : "") }, valve.actual ? "● Open" : "○ Closed");
-      const by = (lv?.open_by || []).map((o) => o.manual ? `manual · ${fmtDur(o.left_s)} left` : `${o.run} · step ${o.step} · ${fmtDur(o.left_s)} left`);
+      if (valve?.actual && (lv?.open_by || []).length && lv.open_by.every((o) => o.closing)) status = h("span", { class: "state closing" }, "● Closing");
+      const by = (lv?.open_by || []).map((o) => (o.manual ? "manual" : `${o.run} · step ${o.step}`) + (o.closing ? ` · closing in ${fmtDur(o.left_s)}` : ` · ${fmtDur(o.left_s)} left`));
       const notes = [];
       if (valve?.out_of_sync) notes.push(h("span", { class: "tag warn" }, `out of sync: should be ${valve.commanded ? "open" : "closed"}`));
-      if (valve?.held_closed) notes.push(h("span", { class: "tag warn" }, "held closed by you"));
+      if (valve?.held_closed) notes.push(h("span", { class: "tag closing" }, "held closed by you until the next step that needs it"));
       if (valve?.actual && !valve.wanted && !valve.out_of_sync) notes.push(h("span", { class: "tag warn" }, "open, but no program needs it"));
       if (b.enabled === false) notes.push(h("span", { class: "tag" }, "disabled"));
       const canAct = b.entity && savedIds.has(b.id);
-      const rowCls = valve?.actual ? "row-run" : b.enabled === false ? "row-off" : "";
+      const closing = (lv?.open_by || []).length && lv.open_by.every((o) => o.closing);
+      const rowCls = valve?.held_closed ? "row-closing" : valve?.actual ? (closing ? "row-closing" : "row-run") : b.enabled === false ? "row-off" : "";
       tb.append(h("tr", { class: rowCls },
         h("td", { class: "mono num-cell", "data-label": "No." }, b.number),
         h("td", { "data-label": "Block" }, h("div", { class: "strong" }, b.name || "—"), h("div", { class: "muted small" }, b.entity || "")),
@@ -743,15 +758,15 @@ function blockForm(b) {
   return { el, read };
 }
 
-function editBlock(b) {
+function editBlock(b, isNew = false) {
   const d = S.draft;
   const usedIn = d.programs.filter((p) => p.steps.some((s) => s.blocks.includes(b.id))).map((p) => p.name);
   modal((box, close) => {
     const form = blockForm(b);
-    box.append(h("h2", {}, `Edit block ${b.number}`), h("div", { class: "body" }, form.el),
+    box.append(h("h2", {}, isNew ? "Add a block" : `Edit block ${b.number}`), h("div", { class: "body" }, form.el),
       usedIn.length ? h("p", { class: "muted", style: "margin:0;font-size:13px" }, "Used in: " + usedIn.join(", ")) : null,
       h("div", { class: "foot", style: "justify-content:space-between" },
-        h("button", { class: "btn danger", onclick: async () => {
+        isNew ? h("span") : h("button", { class: "btn danger", onclick: async () => {
           close();
           if (!(await confirmBox("Delete block?", usedIn.length ? `Block ${b.number} is used in ${usedIn.join(", ")}. Delete it and take it out of those programs?` : `Delete block ${b.number}?`, "Delete", true))) return;
           d.programs.forEach((p) => p.steps.forEach((s) => (s.blocks = s.blocks.filter((x) => x !== b.id))));
@@ -762,40 +777,23 @@ function editBlock(b) {
           h("button", { class: "btn primary", onclick: () => {
             const v = form.read();
             if (v.mainline !== b.mainline && usedIn.length) toast(`Block ${b.number} is used in ${usedIn.join(", ")}: those programs will show a problem until fixed.`, 6000);
-            Object.assign(b, v); close(); changed();
-          } }, "Done"))));
+            const clash = d.blocks.find((x) => x !== b && v.entity && x.entity === v.entity);
+            if (clash) { toast(`Valve ${v.entity} is already used by block ${clash.number}.`, 6000); return; }
+            if (d.blocks.some((x) => x !== b && +x.number === +v.number)) { toast(`Block number ${v.number} is already used.`, 6000); return; }
+            Object.assign(b, v);
+            if (isNew) d.blocks.push(b);
+            close(); changed();
+          } }, isNew ? "Add block" : "Done"))));
   });
 }
 
 function addBlocksDialog() {
   const d = S.draft;
   if (!d.mainlines.length) { toast("Add a mainline first"); return; }
-  const next = Math.max(0, ...d.blocks.map((b) => +b.number || 0)) + 1;
-  modal((box, close) => {
-    const count = h("input", { type: "number", class: "num", min: 1, max: 100, value: 1 });
-    const start = h("input", { type: "number", class: "num", min: 1, value: next });
-    const ml = h("select", {}, d.mainlines.map((m) => h("option", { value: m.id }, m.name)));
-    const mins = h("input", { type: "number", class: "num", min: 1, value: 60 });
-    box.append(h("h2", {}, "Add blocks"),
-      h("div", { class: "form-grid" },
-        h("label", { class: "field" }, "How many", count),
-        h("label", { class: "field" }, "First number", start),
-        h("label", { class: "field" }, "Mainline", ml),
-        h("label", { class: "field" }, "Default runtime (minutes)", mins)),
-      h("p", { class: "muted", style: "margin:0;font-size:13px" }, "Set each block's valve switch afterwards with ✎."),
-      h("div", { class: "foot" },
-        h("button", { class: "btn ghost", onclick: () => close() }, "Cancel"),
-        h("button", { class: "btn primary", onclick: () => {
-          let n = +start.value || next;
-          const used = new Set(d.blocks.map((b) => +b.number));
-          for (let i = 0; i < Math.min(100, +count.value || 1); i++) {
-            while (used.has(n)) n++;
-            d.blocks.push({ id: rid("b"), number: n, name: `Block ${n}`, entity: "", mainline: ml.value, default_min: +mins.value || 60, enabled: true });
-            used.add(n); n++;
-          }
-          close(); changed();
-        } }, "Add")));
-  });
+  const n = Math.max(0, ...d.blocks.map((b) => +b.number || 0)) + 1;
+  const last = d.blocks[d.blocks.length - 1];
+  editBlock({ id: rid("b"), number: n, name: `Block ${n}`, entity: "", mainline: last?.mainline || d.mainlines[0].id,
+    default_min: last ? +last.default_min || 60 : 60, enabled: true }, true);
 }
 
 /* ------------------------------------------------------------ mainlines */

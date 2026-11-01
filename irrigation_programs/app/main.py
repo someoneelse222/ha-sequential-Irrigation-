@@ -125,9 +125,10 @@ class App:
             v = eng.run_view(r)
             runs_by_ml.setdefault(r["mainline"], []).append(v)
             for s in v["steps"]:
-                if s["status"] == "running":
+                if s["status"] in ("running", "closing"):
                     for b in s["blocks"]:
                         open_by.setdefault(b["id"], []).append({"run": v["name"], "step": s["n"], "left_s": s["left_s"],
+                                                                "closing": s["status"] == "closing",
                                                                 "manual": r["source"] == "block", "run_id": r["id"]})
 
         def ent_view(e):

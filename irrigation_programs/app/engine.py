@@ -240,9 +240,32 @@ class Engine:
         pump = bool(blocks) and opened is not None and now - opened >= ps and run["e"] < self.end_e(run, geo) - pe
         return blocks, pump
 
+    def run_block_keys(self, run: dict) -> dict[str, set[str]]:
+        """block id -> {"run_id:g"} for the steps of this run that want it open now."""
+        bl, _ = self.run_wants(run)
+        if not bl:
+            return {}
+        geo = self.geometry(run)
+        out: dict[str, set[str]] = {}
+        for g in self.active_steps(run, geo=geo):
+            for b in geo["plan"][g % geo["n"]]["blocks"]:
+                if b in bl:
+                    out.setdefault(b, set()).add(f"{run['id']}:{g}")
+        return out
+
+    def want_keys(self) -> dict[str, set[str]]:
+        """entity -> keys of the run steps that want it open."""
+        blocks = model.by_id(self.cfg["blocks"])
+        keys: dict[str, set[str]] = {}
+        for run in self.runs:
+            for bid, ks in self.run_block_keys(run).items():
+                b = blocks.get(bid)
+                if b and b.get("entity") and b.get("enabled", True):
+                    keys.setdefault(b["entity"], set()).update(ks)
+        return keys
+
     def desired(self) -> dict[str, bool]:
         """entity -> should be on, for every entity this add-on manages."""
-        blocks = model.by_id(self.cfg["blocks"])
         mls = model.by_id(self.cfg["mainlines"])
         want: dict[str, bool] = {}
         for b in self.cfg["blocks"]:
@@ -252,21 +275,24 @@ class Engine:
             for e in ml.get("pump_entities", []):
                 if e:
                     want[e] = False
+        keys = self.want_keys()
+        for ent in keys:
+            want[ent] = True
         for run in self.runs:
-            bl, pump = self.run_wants(run)
-            for bid in bl:
-                b = blocks.get(bid)
-                if b and b.get("entity") and b.get("enabled", True):
-                    want[b["entity"]] = True
+            _, pump = self.run_wants(run)
             ml = mls.get(run["mainline"]) or run["ml"]
             for e in ml.get("pump_entities", []):
                 if e:
                     want[e] = want.get(e, False) or pump
-        # manual "close" overrides last until nothing wants the entity any more
+        # manual "close": a block is held closed only for the step(s) it was closed in;
+        # as soon as another step wants it, it opens again. A pump is held while wanted.
         for ent, ov in list(self.overrides.items()):
-            if not want.get(ent):
+            held = ov.get("keys")
+            if not want.get(ent) or (held is not None and not keys.get(ent, set()) <= set(held)):
                 self.overrides.pop(ent)
                 self.dirty = True
+                if want.get(ent) and held is not None:
+                    self.event(f"{self.label(ent).capitalize()} is needed by a new step: opening it again.")
             else:
                 want[ent] = ov.get("on", False)
         return want
@@ -440,12 +466,12 @@ class Engine:
             self.stop_run(r)
         others = [r for r in in_runs if r["source"] != "block"]
         if others:
-            self.overrides[ent] = {"on": False}
+            self.overrides[ent] = {"on": False, "keys": sorted(self.want_keys().get(ent, set()))}
             self.dirty = True
         if not manual:
             await self.send(ent, False, f"Sent close to block {block['number']}" +
-                            (f" (held closed while {', '.join(r['name'] for r in others)} needs it)." if others else "."))
-            return True, "Sent the close signal." + (" It stays closed for the rest of this step." if others else "")
+                            (f": held closed for the rest of this step of {', '.join(r['name'] for r in others)}." if others else "."))
+            return True, "Sent the close signal." + (" It stays closed until a later step needs it." if others else "")
         return True, f"Closing block {block['number']} (pump first)."
 
     async def pump_command(self, ml: dict, on: bool) -> tuple[bool, str]:
@@ -521,16 +547,19 @@ class Engine:
             if lg is not None and g > lg:
                 status = "skipped"
             elif g in active:
-                status = "running"
+                closing_run = run["state"] in ("pausing", "stopping") or \
+                    (run["state"] == "running" and self.end_e(run, geo) - run["e"] <= float(run["ml"].get("pump_stop_s", 0) or 0) + 0.01)
+                status = "closing" if (closing_run or any(a > g for a in active)) else "running"
             elif en <= run["e"]:
                 status = "done"
             else:
                 status = "later"
             steps.append({
                 "n": i + 1, "status": status, "duration_s": pl["duration"], "overlap_s": pl["overlap"],
-                "blocks": [{"id": b, "number": blocks.get(b, {}).get("number", "?"), "name": blocks.get(b, {}).get("name", "")} for b in pl["blocks"]],
+                "blocks": [{"id": b, "number": blocks.get(b, {}).get("number", "?"), "name": blocks.get(b, {}).get("name", ""),
+                            "held": blocks.get(b, {}).get("entity") in self.overrides} for b in pl["blocks"]],
                 "starts_at": at(s), "ends_at": at(min(en, self.end_e(run, geo))),
-                "left_s": max(0.0, en - run["e"]) if status == "running" else None,
+                "left_s": max(0.0, en - run["e"]) if status in ("running", "closing") else None,
             })
         nxt = next((st for st in steps if st["status"] == "later"), None)
         if nxt:
@@ -543,6 +572,7 @@ class Engine:
             "period_s": geo["period"], "step": (cur % n + 1) if cur is not None else None, "steps": steps,
             "ends_at": None if end == math.inf else (None if held else now + end - run["e"]),
             "stop_at": run.get("stop_at"), "finishing": run.get("last_g") is not None,
+            "closing": run["state"] in ("pausing", "stopping") or any(st["status"] == "closing" for st in steps),
             "next_loop_at": None if mode == "once" or held or lg is not None and base_g + n > lg else now + (base_g // n + 1) * geo["period"] - run["e"],
         }
 

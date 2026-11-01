@@ -35,15 +35,13 @@ with sync_playwright() as pw:
     shot(page, "01-mainlines")
 
     page.click("#tabs button[data-tab=blocks]")
-    page.click("text=+ Add blocks")
-    page.locator(".modal .form-grid input").nth(0).fill("6")
-    page.locator(".modal .form-grid input").nth(2).fill("90")
-    page.click(".modal >> button.primary")
     names = ["Citrus North", "Citrus South", "Vines A", "Vines B", "Pivot 1", "Nursery"]
     for i, n in enumerate(names):
-        page.locator("#block-table tbody tr").nth(i).locator("button[title='Edit block']").click()
+        page.click("text=+ Add block")
         page.locator(".modal .form-grid input[type=text]").nth(0).fill(n)
         page.locator(".modal .form-grid input[type=text]").nth(1).fill(f"switch.valve_{i + 1}")
+        page.locator(".modal .form-grid input[type=number]").nth(1).fill("1")
+        page.locator(".modal .form-grid input[type=number]").nth(2).fill("30")
         page.click(".modal .foot button.primary")
     shot(page, "02-blocks-unsaved")
 

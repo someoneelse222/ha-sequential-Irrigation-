@@ -16,6 +16,8 @@
   --amber-soft: #fbf0dc;
   --red: #b3372f;
   --red-soft: #fbe7e5;
+  --orange: #c2410c;
+  --orange-soft: #ffedd5;
   --radius: 10px;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   color-scheme: light;
@@ -39,6 +41,8 @@
     --amber-soft: #3a2c14;
     --red: #ec7b72;
     --red-soft: #3c1e1b;
+    --orange: #fb923c;
+    --orange-soft: #3d2410;
     color-scheme: dark;
   }
 }
@@ -381,3 +385,22 @@ td.cb input { width: 18px; height: 18px; }
 .state.paused { color: var(--amber); }
 tr.row-paused td { background: color-mix(in srgb, var(--amber-soft) 70%, transparent); }
 tr.row-paused td:first-child { box-shadow: inset 4px 0 0 var(--amber); }
+
+/* v0.4: closing / held closed = orange */
+.pill.closing { background: var(--orange-soft); color: var(--orange); }
+.run.closing, .run.stopping, .run.pausing { border-color: color-mix(in srgb, var(--orange) 55%, var(--line)); }
+.st.closing { background: var(--orange-soft); }
+.st.closing .st-n { background: var(--orange); color: #fff; border-color: var(--orange); }
+.closing-txt { color: var(--orange); }
+.chip.closing { background: var(--orange-soft); color: var(--orange); border-color: transparent; }
+.chip.held { background: var(--orange-soft); color: var(--orange); border: 1px dashed var(--orange); text-decoration: line-through; }
+.held-note { margin: 10px 16px 0; padding: 9px 12px; border-radius: 8px; background: var(--orange-soft); color: var(--orange); font-size: 14px; }
+.tag.closing { background: var(--orange-soft); color: var(--orange); }
+.state.closing { color: var(--orange); }
+tr.row-closing td { background: color-mix(in srgb, var(--orange-soft) 75%, transparent); }
+tr.row-closing td:first-child { box-shadow: inset 4px 0 0 var(--orange); }
+@media (max-width: 700px) {
+  tr.row-closing { box-shadow: inset 4px 0 0 var(--orange); background: color-mix(in srgb, var(--orange-soft) 75%, transparent); }
+  tr.row-paused { box-shadow: inset 4px 0 0 var(--amber); background: color-mix(in srgb, var(--amber-soft) 70%, transparent); }
+  .held-note { margin: 10px 12px 0; }
+}

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+- Orange for anything about to close: steps in their overlap, programs stopping/pausing/ending, closing blocks.
+- Closing a block that a program has open holds it closed only for that step; it opens again at the next step that needs it. The Live page shows held-closed blocks clearly.
+- "Add block" adds one block through a dialog.
+
 ## 0.3.0
 - Header line shows valve switching as it happens (e.g. "Opened block 3", "Waiting 5 s to close blocks on Mainline 1").
 - Live page: each mainline is its own clearly separated section with its controls next to the title.

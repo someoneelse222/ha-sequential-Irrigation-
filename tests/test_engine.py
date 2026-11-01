@@ -197,7 +197,40 @@ def test_until_finishes_step():
     print("until ok")
 
 
+def test_held_closed_reopens_next_step():
+    cfg = farm(True)
+    for p in cfg["programs"]:
+        p["enabled"] = False
+    clock = [T0 + 3600]
+    ha = FakeHA(clock)
+    eng = mk(cfg, clock, ha, tempfile.mkdtemp())
+    loop = next(p for p in cfg["programs"] if p["id"] == "p_loop")   # b4 2 min, b5 2 min, 30 s overlaps
+
+    async def go():
+        eng.start_program(loop)
+        await run_for(eng, cfg, clock, 20)
+        b4 = next(b for b in cfg["blocks"] if b["number"] == 4)
+        await eng.block_command(b4, False)
+        await run_for(eng, cfg, clock, 5)
+        assert ha.st["switch.valve_4"] == "off" and ha.st["switch.pump"] == "on"
+        v = eng.run_view(eng.runs[0])
+        assert v["steps"][0]["blocks"][0]["held"]
+        await run_for(eng, cfg, clock, 120)          # step 2 (b5) running, b4 still not needed
+        assert ha.st["switch.valve_4"] == "off" and ha.st["switch.valve_5"] == "on"
+        await run_for(eng, cfg, clock, 90)           # next loop: step 1 needs b4 again
+        assert ha.st["switch.valve_4"] == "on", ha.st
+        assert not eng.overrides
+        # overlap: step 2 of loop 2 opening while step 1 closes -> step 1 shows "closing"
+        await run_for(eng, cfg, clock, 45)
+        v = eng.run_view(eng.runs[0])
+        assert [s["status"] for s in v["steps"]] == ["closing", "running"], [s["status"] for s in v["steps"]]
+        assert v["closing"]
+    asyncio.run(go())
+    print("held closed ok")
+
+
 if __name__ == "__main__":
+    test_held_closed_reopens_next_step()
     test_once_with_overlap_and_pump_order()
     test_pause_resume_restart_and_stop()
     test_two_programs_share_mainline_and_block_manual()
